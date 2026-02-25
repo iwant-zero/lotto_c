@@ -1,178 +1,103 @@
-// scripts/update_lotto.mjs
 import fs from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-const DATA_PATH = path.resolve("data/lotto.json");
-const API_BASE = "https://www.dhlottery.co.kr/common.do?method=getLottoNumber&drwNo=";
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const ROOT = path.resolve(__dirname, "..");
+const OUT_PATH = path.join(ROOT, "data", "lotto.json");
 
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
+// ✅ 차단 잘 안 걸리는 공개 JSON 소스(미러)
+const SOURCE_ALL = "https://smok95.github.io/lotto/results/all.json";
+
+function withTimeout(ms) {
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort(), ms);
+  return { signal: ac.signal, clear: () => clearTimeout(t) };
 }
 
-async function fetchText(url, timeoutMs = 15000) {
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), timeoutMs);
-
+async function fetchJson(url) {
+  const { signal, clear } = withTimeout(30_000);
   try {
     const res = await fetch(url, {
-      method: "GET",
+      signal,
       headers: {
-        "accept": "application/json,text/plain,*/*",
-        "user-agent": "lotto-issueops/1.0 (github-actions)"
+        "User-Agent": "lotto-issueops/1.0 (+github actions)",
+        "Accept": "application/json,text/plain,*/*",
       },
-      signal: ctrl.signal
     });
 
     const text = await res.text();
+
     if (!res.ok) {
-      throw new Error(`[HTTP ${res.status}] ${text.slice(0, 200)}`);
+      throw new Error(`[HTTP ${res.status}] ${text.slice(0, 300)}`);
     }
-    return text;
+
+    try {
+      return JSON.parse(text);
+    } catch (e) {
+      // JSON이 아닌 내용(HTML 등) 받으면 여기로 떨어짐
+      throw new Error(
+        `JSON parse failed. Head:\n${text.slice(0, 500)}\n---\n${String(e)}`
+      );
+    }
   } finally {
-    clearTimeout(t);
+    clear();
   }
 }
 
-function extractJson(text) {
-  const s = text.trim();
+// smok95 포맷 -> 우리 포맷(동행복권 키 스타일)로 변환
+function normalizeDraw(d) {
+  // d: { draw_no, numbers:[6], bonus_no, date:"2020-09-19T00:00:00Z", ... }
+  if (!d || typeof d.draw_no !== "number") return null;
+  if (!Array.isArray(d.numbers) || d.numbers.length < 6) return null;
 
-  // 정상 JSON이면 바로 파싱
-  if (s.startsWith("{") && s.endsWith("}")) return JSON.parse(s);
+  const nums = d.numbers.slice(0, 6).map(Number);
+  if (nums.some((n) => !Number.isInteger(n))) return null;
 
-  // 가끔 앞뒤에 이상한 문자가 붙는 경우 대비
-  const first = s.indexOf("{");
-  const last = s.lastIndexOf("}");
-  if (first >= 0 && last > first) {
-    const slice = s.slice(first, last + 1);
-    return JSON.parse(slice);
-  }
-
-  throw new Error(`[lotto] response is not JSON: ${s.slice(0, 200)}`);
-}
-
-async function fetchDrawRaw(no) {
-  const url = `${API_BASE}${no}`;
-  const text = await fetchText(url);
-  return extractJson(text);
-}
-
-function normalizeDraw(obj) {
-  if (!obj || obj.returnValue !== "success") return null;
-
-  const nums = [
-    obj.drwtNo1, obj.drwtNo2, obj.drwtNo3,
-    obj.drwtNo4, obj.drwtNo5, obj.drwtNo6
-  ].map(Number);
-
-  const bonus = Number(obj.bnusNo);
-  const drawNo = Number(obj.drwNo);
-  const drawDate = String(obj.drwNoDate || "");
-
-  if (!drawNo || nums.some((n) => !Number.isFinite(n)) || !Number.isFinite(bonus)) return null;
-
-  nums.sort((a, b) => a - b);
+  const dateIso = typeof d.date === "string" ? d.date : "";
+  const drwNoDate = dateIso.length >= 10 ? dateIso.slice(0, 10) : "";
 
   return {
-    no: drawNo,
-    date: drawDate,
-    numbers: nums,
-    bonus
+    drwNo: d.draw_no,
+    drwNoDate,
+    drwtNo1: nums[0],
+    drwtNo2: nums[1],
+    drwtNo3: nums[2],
+    drwtNo4: nums[3],
+    drwtNo5: nums[4],
+    drwtNo6: nums[5],
+    bnusNo: Number(d.bonus_no ?? 0),
+    // 투명성(원하면 유지)
+    source: "smok95.github.io/lotto",
   };
 }
 
-async function isSuccess(no) {
-  const raw = await fetchDrawRaw(no);
-  return raw?.returnValue === "success";
-}
-
-async function findLatestDrawNo() {
-  // ✅ drwNo=1도 실패하면 API 접근 자체가 안 되는 거라서 "성공처럼 끝내면 안 됨"
-  const ok1 = await isSuccess(1);
-  if (!ok1) {
-    throw new Error("[lotto] 동행복권 API 접근 실패: drwNo=1도 success가 아닙니다. (네트워크/차단/응답변조 가능)");
-  }
-
-  let hi = 1;
-  while (await isSuccess(hi)) {
-    hi *= 2;
-    // 너무 빠르게 두드리면 막히는 경우가 있어서 약간 쉬기
-    await sleep(120);
-    if (hi > 10000) break;
-  }
-
-  let lo = Math.floor(hi / 2);
-  let left = lo;
-  let right = hi;
-
-  while (left + 1 < right) {
-    const mid = Math.floor((left + right) / 2);
-    const ok = await isSuccess(mid);
-    await sleep(80);
-
-    if (ok) left = mid;
-    else right = mid;
-  }
-  return left;
-}
-
-async function readExisting() {
-  try {
-    const s = await fs.readFile(DATA_PATH, "utf8");
-    const parsed = JSON.parse(s);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-
-async function writeJson(obj) {
-  await fs.mkdir(path.dirname(DATA_PATH), { recursive: true });
-  await fs.writeFile(DATA_PATH, JSON.stringify(obj, null, 2) + "\n", "utf8");
-}
-
 async function main() {
-  const existing = await readExisting();
-  const map = new Map();
+  await fs.mkdir(path.join(ROOT, "data"), { recursive: true });
 
-  for (const d of existing) {
-    if (d && typeof d.no === "number") map.set(d.no, d);
+  const all = await fetchJson(SOURCE_ALL);
+  if (!Array.isArray(all) || all.length === 0) {
+    throw new Error("SOURCE_ALL returned empty array.");
   }
 
-  const latest = await findLatestDrawNo();
+  const normalized = all
+    .map(normalizeDraw)
+    .filter(Boolean)
+    .sort((a, b) => a.drwNo - b.drwNo);
 
-  // 기존이 비어있으면 1부터, 아니면 마지막+1부터
-  const existingNos = [...map.keys()];
-  const start = existingNos.length ? Math.max(...existingNos) + 1 : 1;
-
-  console.log(`[lotto] latest=${latest}, start=${start}, existing=${existingNos.length}`);
-
-  const fetched = [];
-  for (let n = start; n <= latest; n++) {
-    const raw = await fetchDrawRaw(n);
-    const norm = normalizeDraw(raw);
-    if (norm) {
-      fetched.push(norm);
-      map.set(norm.no, norm);
-      console.log(`[lotto] +${norm.no} (${norm.date}) ${norm.numbers.join(",")} +${norm.bonus}`);
-    } else {
-      throw new Error(`[lotto] draw ${n} fetch failed (returnValue=${raw?.returnValue})`);
-    }
-    await sleep(80);
+  if (normalized.length === 0) {
+    throw new Error("No valid draws after normalization.");
   }
 
-  const merged = [...map.values()].sort((a, b) => a.no - b.no);
+  await fs.writeFile(OUT_PATH, JSON.stringify(normalized, null, 2), "utf8");
 
-  // ✅ merged가 0이면 “성공”으로 끝내지 말고 실패 처리해서 Actions 로그로 원인 보이게
-  if (merged.length === 0) {
-    throw new Error("[lotto] 업데이트 결과가 0건입니다. API가 막혔거나 응답이 비정상입니다.");
-  }
-
-  await writeJson(merged);
-
-  console.log(`[lotto] done. total=${merged.length}, added=${fetched.length}`);
+  const last = normalized[normalized.length - 1];
+  console.log(
+    `[lotto] updated: ${normalized.length} draws (last: ${last.drwNo} / ${last.drwNoDate})`
+  );
 }
 
-main().catch((e) => {
-  console.error(String(e?.stack || e));
+main().catch((err) => {
+  console.error("[lotto] update failed:", err);
   process.exit(1);
 });
