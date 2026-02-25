@@ -1,26 +1,32 @@
 name: Lotto IssueOps + Scheduled Update
 
 on:
-  workflow_dispatch:
   issues:
     types: [labeled]
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "update or recommend"
+        required: true
+        default: "update"
+      sets:
+        description: "1|5|10"
+        required: true
+        default: "10"
   schedule:
-    - cron: "20 12 * * 6" # 매주 토요일 21:20 KST (UTC 12:20)
+    # 토요일 21:10 KST = 12:10 UTC
+    - cron: "10 12 * * 6"
 
 permissions:
   contents: write
   issues: write
 
-concurrency:
-  group: lotto-issueops
-  cancel-in-progress: false
-
 jobs:
-  run:
+  issueops:
     runs-on: ubuntu-latest
 
-    # issues 이벤트일 때는 update-lotto / lotto 라벨만 처리
-    if: |
+    # issues 이벤트면 update-lotto / lotto 라벨일 때만 실행
+    if: >
       github.event_name != 'issues' ||
       github.event.label.name == 'update-lotto' ||
       github.event.label.name == 'lotto'
@@ -32,46 +38,54 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: 20
 
-      # update-lotto 라벨 또는 schedule/dispatch면 데이터 갱신
-      - name: Update lotto data
-        if: github.event_name != 'issues' || github.event.label.name == 'update-lotto'
+      - name: Decide mode/sets
+        id: cfg
+        run: |
+          if [ "${{ github.event_name }}" = "issues" ]; then
+            if [ "${{ github.event.label.name }}" = "update-lotto" ]; then
+              echo "mode=update" >> $GITHUB_OUTPUT
+            else
+              echo "mode=recommend" >> $GITHUB_OUTPUT
+            fi
+            echo "sets=10" >> $GITHUB_OUTPUT
+          else
+            echo "mode=${{ inputs.mode || 'update' }}" >> $GITHUB_OUTPUT
+            echo "sets=${{ inputs.sets || '10' }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Update lotto data (update-lotto)
+        if: steps.cfg.outputs.mode == 'update'
         run: node scripts/update_lotto.mjs
 
-      - name: Commit updated data
-        if: github.event_name != 'issues' || github.event.label.name == 'update-lotto'
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: "chore: update lotto data"
-          file_pattern: "data/lotto.json"
-
-      # issues 이벤트면 추천 메시지 생성
-      - name: Build recommendation
-        if: github.event_name == 'issues'
-        id: rec
+      - name: Commit & push (only if changed)
+        if: steps.cfg.outputs.mode == 'update'
         run: |
-          OUT="$(node scripts/recommend.mjs || true)"
-          echo "msg<<EOF" >> $GITHUB_OUTPUT
-          echo "$OUT" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      # issues 댓글로 출력
-      - name: Comment on Issue
+          git add data/lotto.json
+          if git diff --cached --quiet; then
+            echo "No data changes."
+            exit 0
+          fi
+
+          git commit -m "chore: update lotto data"
+          git push
+
+      - name: Build comment body
+        id: body
+        run: |
+          node scripts/recommend.mjs ${{ steps.cfg.outputs.sets }} > comment.md
+
+      - name: Comment to issue (issues only)
         if: github.event_name == 'issues'
         uses: actions/github-script@v7
         with:
           script: |
-            const msg = `${{ steps.rec.outputs.msg }}`.trim();
-            const pages = `https://${context.repo.owner}.github.io/${context.repo.repo}/`;
-
-            let body =
-              (msg && msg !== "NO_DATA")
-                ? `${msg}\n\n🔗 Pages: ${pages}`
-                : `⚠️ data/lotto.json이 비어있습니다.\n라벨 **update-lotto**로 먼저 데이터 수집을 실행하세요.\n\n🔗 Pages: ${pages}`;
-
-            body += `\n\n---\n라벨 안내\n- **update-lotto**: 당첨 데이터 갱신(+커밋) + 추천 댓글\n- **lotto**: 현재 데이터 기준 추천 댓글만`;
-
+            const fs = require("fs");
+            const body = fs.readFileSync("comment.md", "utf8");
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
