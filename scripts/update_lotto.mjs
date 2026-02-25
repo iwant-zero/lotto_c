@@ -1,196 +1,178 @@
-import fs from "fs";
-import path from "path";
+// scripts/update_lotto.mjs
+import fs from "node:fs/promises";
+import path from "node:path";
 
-const DATA_PATH = path.join("data", "lotto.json");
-const ENDPOINT = (n) =>
-  `https://www.dhlottery.co.kr/common.do?method=getLottoNumber&drwNo=${n}`;
+const DATA_PATH = path.resolve("data/lotto.json");
+const API_BASE = "https://www.dhlottery.co.kr/common.do?method=getLottoNumber&drwNo=";
 
-const HEADERS = {
-  "User-Agent":
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
-  Accept: "application/json,text/plain,*/*",
-  Referer: "https://www.dhlottery.co.kr/",
-  "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
-};
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function fetchText(url, timeoutMs = 15000) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
 
-function safeReadJsonArray(filePath) {
   try {
-    const raw = fs.readFileSync(filePath, "utf8");
-    const arr = JSON.parse(raw);
-    return Array.isArray(arr) ? arr : [];
+    const res = await fetch(url, {
+      method: "GET",
+      headers: {
+        "accept": "application/json,text/plain,*/*",
+        "user-agent": "lotto-issueops/1.0 (github-actions)"
+      },
+      signal: ctrl.signal
+    });
+
+    const text = await res.text();
+    if (!res.ok) {
+      throw new Error(`[HTTP ${res.status}] ${text.slice(0, 200)}`);
+    }
+    return text;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+function extractJson(text) {
+  const s = text.trim();
+
+  // 정상 JSON이면 바로 파싱
+  if (s.startsWith("{") && s.endsWith("}")) return JSON.parse(s);
+
+  // 가끔 앞뒤에 이상한 문자가 붙는 경우 대비
+  const first = s.indexOf("{");
+  const last = s.lastIndexOf("}");
+  if (first >= 0 && last > first) {
+    const slice = s.slice(first, last + 1);
+    return JSON.parse(slice);
+  }
+
+  throw new Error(`[lotto] response is not JSON: ${s.slice(0, 200)}`);
+}
+
+async function fetchDrawRaw(no) {
+  const url = `${API_BASE}${no}`;
+  const text = await fetchText(url);
+  return extractJson(text);
+}
+
+function normalizeDraw(obj) {
+  if (!obj || obj.returnValue !== "success") return null;
+
+  const nums = [
+    obj.drwtNo1, obj.drwtNo2, obj.drwtNo3,
+    obj.drwtNo4, obj.drwtNo5, obj.drwtNo6
+  ].map(Number);
+
+  const bonus = Number(obj.bnusNo);
+  const drawNo = Number(obj.drwNo);
+  const drawDate = String(obj.drwNoDate || "");
+
+  if (!drawNo || nums.some((n) => !Number.isFinite(n)) || !Number.isFinite(bonus)) return null;
+
+  nums.sort((a, b) => a - b);
+
+  return {
+    no: drawNo,
+    date: drawDate,
+    numbers: nums,
+    bonus
+  };
+}
+
+async function isSuccess(no) {
+  const raw = await fetchDrawRaw(no);
+  return raw?.returnValue === "success";
+}
+
+async function findLatestDrawNo() {
+  // ✅ drwNo=1도 실패하면 API 접근 자체가 안 되는 거라서 "성공처럼 끝내면 안 됨"
+  const ok1 = await isSuccess(1);
+  if (!ok1) {
+    throw new Error("[lotto] 동행복권 API 접근 실패: drwNo=1도 success가 아닙니다. (네트워크/차단/응답변조 가능)");
+  }
+
+  let hi = 1;
+  while (await isSuccess(hi)) {
+    hi *= 2;
+    // 너무 빠르게 두드리면 막히는 경우가 있어서 약간 쉬기
+    await sleep(120);
+    if (hi > 10000) break;
+  }
+
+  let lo = Math.floor(hi / 2);
+  let left = lo;
+  let right = hi;
+
+  while (left + 1 < right) {
+    const mid = Math.floor((left + right) / 2);
+    const ok = await isSuccess(mid);
+    await sleep(80);
+
+    if (ok) left = mid;
+    else right = mid;
+  }
+  return left;
+}
+
+async function readExisting() {
+  try {
+    const s = await fs.readFile(DATA_PATH, "utf8");
+    const parsed = JSON.parse(s);
+    return Array.isArray(parsed) ? parsed : [];
   } catch {
     return [];
   }
 }
 
-function safeWriteJson(filePath, value) {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, JSON.stringify(value, null, 2), "utf8");
-}
-
-// {"returnValue": ... } 로 시작하는 JSON 객체만 추출(HTML/잡텍스트 섞여도 처리)
-function extractReturnValueJson(text) {
-  const re = /\{\s*"returnValue"\s*:/;
-  const m = re.exec(text);
-  if (!m) return null;
-
-  const start = m.index;
-  let depth = 0;
-  let inStr = false;
-  let esc = false;
-  let end = -1;
-
-  for (let i = start; i < text.length; i++) {
-    const ch = text[i];
-
-    if (inStr) {
-      if (esc) esc = false;
-      else if (ch === "\\") esc = true;
-      else if (ch === '"') inStr = false;
-      continue;
-    }
-
-    if (ch === '"') {
-      inStr = true;
-      continue;
-    }
-    if (ch === "{") depth++;
-    if (ch === "}") {
-      depth--;
-      if (depth === 0) {
-        end = i;
-        break;
-      }
-    }
-  }
-
-  if (end === -1) return null;
-  return text.slice(start, end + 1);
-}
-
-async function fetchJson(url, retry = 6) {
-  let lastErr = null;
-
-  for (let i = 0; i < retry; i++) {
-    try {
-      const res = await fetch(url, { headers: HEADERS, redirect: "follow" });
-      const text = await res.text();
-      const trimmed = text.trim();
-
-      // 1) 순수 JSON이면 그대로 파싱
-      try {
-        return JSON.parse(trimmed);
-      } catch {
-        // 2) 섞여 있으면 returnValue JSON만 추출해서 파싱
-        const extracted = extractReturnValueJson(text);
-        if (extracted) return JSON.parse(extracted);
-
-        const head = trimmed.slice(0, 180).replace(/\s+/g, " ");
-        throw new Error(`Non-JSON response (status=${res.status}). head="${head}"`);
-      }
-    } catch (e) {
-      lastErr = e;
-      await sleep(1200 + i * 1200);
-    }
-  }
-
-  throw lastErr ?? new Error("fetchJson failed");
-}
-
-function normalizeDraw(j) {
-  if (!j || j.returnValue !== "success") return null;
-
-  const nums = [j.drwtNo1, j.drwtNo2, j.drwtNo3, j.drwtNo4, j.drwtNo5, j.drwtNo6]
-    .map(Number)
-    .filter(Number.isFinite);
-
-  if (nums.length !== 6) return null;
-
-  return {
-    drwNo: Number(j.drwNo),
-    drwNoDate: String(j.drwNoDate || ""),
-    nums,
-    bonus: Number(j.bnusNo),
-  };
-}
-
-async function isSuccessDraw(n) {
-  const j = await fetchJson(ENDPOINT(n), 4);
-  return j && j.returnValue === "success";
-}
-
-async function findLatestDrawNo() {
-  let lo = 1;
-  let hi = 1;
-
-  // hi를 2배씩 키우며 "fail"이 나올 때까지 탐색
-  while (await isSuccessDraw(hi)) {
-    lo = hi;
-    hi *= 2;
-    await sleep(120);
-    if (hi > 20000) break;
-  }
-
-  // (lo=success, hi=fail) 사이 이분탐색
-  let left = lo, right = hi;
-  while (left + 1 < right) {
-    const mid = Math.floor((left + right) / 2);
-    const ok = await isSuccessDraw(mid);
-    if (ok) left = mid;
-    else right = mid;
-    await sleep(120);
-  }
-  return left;
-}
-
-async function fetchRange(from, to, concurrency = 4) {
-  const results = [];
-  let cur = from;
-
-  async function worker() {
-    while (cur <= to) {
-      const n = cur++;
-      const j = await fetchJson(ENDPOINT(n), 6);
-      const d = normalizeDraw(j);
-      if (d) results.push(d);
-      await sleep(160);
-    }
-  }
-
-  await Promise.all(Array.from({ length: concurrency }, () => worker()));
-  results.sort((a, b) => a.drwNo - b.drwNo);
-  return results;
+async function writeJson(obj) {
+  await fs.mkdir(path.dirname(DATA_PATH), { recursive: true });
+  await fs.writeFile(DATA_PATH, JSON.stringify(obj, null, 2) + "\n", "utf8");
 }
 
 async function main() {
-  const existing = safeReadJsonArray(DATA_PATH);
-  const map = new Map(existing.map((d) => [Number(d.drwNo), d]));
+  const existing = await readExisting();
+  const map = new Map();
 
-  const latest = await findLatestDrawNo();
-  const maxKnown = existing.reduce((m, d) => Math.max(m, Number(d.drwNo || 0)), 0);
-
-  console.log(`[lotto] latest(drawNo)=${latest}, known(max)=${maxKnown}`);
-
-  const start = maxKnown > 0 ? maxKnown + 1 : 1;
-  if (start > latest) {
-    console.log("[lotto] nothing to update.");
-    return;
+  for (const d of existing) {
+    if (d && typeof d.no === "number") map.set(d.no, d);
   }
 
-  // 최초 실행이면 1~latest까지 대량 수집
-  const fetched = await fetchRange(start, latest, 4);
-  for (const d of fetched) map.set(d.drwNo, d);
+  const latest = await findLatestDrawNo();
 
-  const merged = Array.from(map.values()).sort((a, b) => a.drwNo - b.drwNo);
-  safeWriteJson(DATA_PATH, merged);
+  // 기존이 비어있으면 1부터, 아니면 마지막+1부터
+  const existingNos = [...map.keys()];
+  const start = existingNos.length ? Math.max(...existingNos) + 1 : 1;
 
-  const newest = merged[merged.length - 1];
-  console.log(`[lotto] updated. total=${merged.length}, newest=${newest?.drwNo} (${newest?.drwNoDate})`);
+  console.log(`[lotto] latest=${latest}, start=${start}, existing=${existingNos.length}`);
+
+  const fetched = [];
+  for (let n = start; n <= latest; n++) {
+    const raw = await fetchDrawRaw(n);
+    const norm = normalizeDraw(raw);
+    if (norm) {
+      fetched.push(norm);
+      map.set(norm.no, norm);
+      console.log(`[lotto] +${norm.no} (${norm.date}) ${norm.numbers.join(",")} +${norm.bonus}`);
+    } else {
+      throw new Error(`[lotto] draw ${n} fetch failed (returnValue=${raw?.returnValue})`);
+    }
+    await sleep(80);
+  }
+
+  const merged = [...map.values()].sort((a, b) => a.no - b.no);
+
+  // ✅ merged가 0이면 “성공”으로 끝내지 말고 실패 처리해서 Actions 로그로 원인 보이게
+  if (merged.length === 0) {
+    throw new Error("[lotto] 업데이트 결과가 0건입니다. API가 막혔거나 응답이 비정상입니다.");
+  }
+
+  await writeJson(merged);
+
+  console.log(`[lotto] done. total=${merged.length}, added=${fetched.length}`);
 }
 
 main().catch((e) => {
-  console.error("[lotto] update failed:", e);
+  console.error(String(e?.stack || e));
   process.exit(1);
 });
