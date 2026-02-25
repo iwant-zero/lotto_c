@@ -1,238 +1,154 @@
-import fs from "fs";
+import fs from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-const DATA_PATH = "data/lotto.json";
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const ROOT = path.resolve(__dirname, "..");
+const DATA_PATH = path.join(ROOT, "data", "lotto.json");
 
-function readData() {
-  const raw = fs.readFileSync(DATA_PATH, "utf8");
-  const arr = JSON.parse(raw);
-  return Array.isArray(arr) ? arr : [];
+const SETS = Number(process.argv[2] ?? 10); // 1 / 5 / 10
+
+function readNums(draw) {
+  return [
+    draw.drwtNo1, draw.drwtNo2, draw.drwtNo3,
+    draw.drwtNo4, draw.drwtNo5, draw.drwtNo6
+  ].map(Number);
 }
 
-function uniqSorted(arr) {
-  return Array.from(new Set(arr)).sort((a, b) => a - b);
-}
-
-function overlapCount(a, b) {
-  const s = new Set(a);
-  let c = 0;
-  for (const x of b) if (s.has(x)) c++;
-  return c;
-}
-
-function sortByScore(nums, scoreMap) {
-  return nums.slice().sort((a, b) => (scoreMap[b] - scoreMap[a]) || (a - b));
-}
-
-function computeStats(draws) {
-  const countsAll = Array(46).fill(0);
-  const countsRecent = Array(46).fill(0);
-
-  const sorted = draws.slice().sort((a, b) => (a.drwNo || 0) - (b.drwNo || 0));
-  const latest = sorted[sorted.length - 1] || null;
-
-  const RECENT_N = 80;
-  const recent = sorted.slice(-RECENT_N);
-
-  for (const d of sorted) for (const n of (d.nums || [])) countsAll[n]++;
-  for (const d of recent) for (const n of (d.nums || [])) countsRecent[n]++;
-
-  const maxAll = Math.max(...countsAll.slice(1), 1);
-  const maxRecent = Math.max(...countsRecent.slice(1), 1);
-
-  const score = Array(46).fill(0);
-  const scoreRecentHeavy = Array(46).fill(0);
-  const scoreAntiRecent = Array(46).fill(0);
-
-  for (let n = 1; n <= 45; n++) {
-    const a = countsAll[n] / maxAll;
-    const r = countsRecent[n] / maxRecent;
-    score[n] = a * 0.8 + r * 0.2;           // 기본
-    scoreRecentHeavy[n] = a * 0.5 + r * 0.5; // 최근 가중
-    scoreAntiRecent[n] = a - r * 0.6;        // 최근 회피
+function buildFreq(draws) {
+  const freq = Array(46).fill(0);
+  for (const d of draws) {
+    for (const n of readNums(d)) {
+      if (Number.isInteger(n) && n >= 1 && n <= 45) freq[n]++;
+    }
   }
-
-  const allNums = [...Array(45)].map((_, i) => i + 1);
-  const orderByAll = allNums.slice().sort((a, b) => (countsAll[b] - countsAll[a]) || (a - b));
-
-  return { sorted, latest, score, scoreRecentHeavy, scoreAntiRecent, orderByAll };
+  return freq;
 }
 
-function pickFromOrdered(ordered, k, shift = 0, rule = null) {
-  const out = [];
-  const used = new Set();
-  const start = Math.max(0, shift | 0);
+function sortedByFreq(freq) {
+  const arr = [];
+  for (let n = 1; n <= 45; n++) arr.push(n);
+  arr.sort((a, b) => (freq[b] - freq[a]) || (a - b));
+  return arr;
+}
 
-  for (let i = start; i < ordered.length && out.length < k; i++) {
-    const n = ordered[i];
-    if (used.has(n)) continue;
-    if (rule && !rule(n, out)) continue;
-    used.add(n);
-    out.push(n);
-  }
-
-  // 부족하면 룰 없이 채움
-  if (out.length < k) {
-    for (let i = start; i < ordered.length && out.length < k; i++) {
-      const n = ordered[i];
-      if (used.has(n)) continue;
+function pickFrom(list, used, offset, predicate = () => true) {
+  for (let i = 0; i < list.length; i++) {
+    const n = list[(i + offset) % list.length];
+    if (!used.has(n) && predicate(n)) {
       used.add(n);
-      out.push(n);
+      return n;
     }
   }
-
-  return out.sort((a, b) => a - b);
+  return null;
 }
 
-// --- 전략들(랜덤 없음) ---
-function setTop6(st, shift = 0) {
-  const ordered = sortByScore([...Array(45)].map((_, i) => i + 1), st.score);
-  return pickFromOrdered(ordered, 6, shift);
-}
+function makeSet(freq, base, idx) {
+  const used = new Set();
+  const hot = base.slice(0, 12);
+  const mid = base.slice(12, 30);
+  const cold = base.slice(-12);
 
-function setRangeBalance(st, shift = 0) {
-  const pick2 = (min, max, s) => {
-    const pool = [];
-    for (let n = min; n <= max; n++) pool.push(n);
-    const ordered = sortByScore(pool, st.score);
-    return pickFromOrdered(ordered, 2, s);
-  };
-  const a = pick2(1, 15, shift);
-  const b = pick2(16, 30, shift);
-  const c = pick2(31, 45, shift);
-  return uniqSorted([...a, ...b, ...c]).slice(0, 6);
-}
+  const pattern = idx % 4;
 
-function setOddEven33(st, shift = 0) {
-  const all = [...Array(45)].map((_, i) => i + 1);
-  const odds = all.filter((n) => n % 2 === 1);
-  const evens = all.filter((n) => n % 2 === 0);
-  const o = pickFromOrdered(sortByScore(odds, st.score), 3, shift);
-  const e = pickFromOrdered(sortByScore(evens, st.score), 3, shift);
-  return uniqSorted([...o, ...e]).slice(0, 6);
-}
-
-function setEndDigitSpread(st, shift = 0) {
-  const ordered = sortByScore([...Array(45)].map((_, i) => i + 1), st.score);
-  const usedDigit = new Set();
-  const rule = (n) => {
-    const d = n % 10;
-    if (usedDigit.has(d)) return false;
-    usedDigit.add(d);
-    return true;
-  };
-  return pickFromOrdered(ordered, 6, shift, rule);
-}
-
-function setNoAdj(st, shift = 0) {
-  const ordered = sortByScore([...Array(45)].map((_, i) => i + 1), st.score);
-  const rule = (n, out) => out.every((x) => Math.abs(x - n) > 1);
-  return pickFromOrdered(ordered, 6, shift, rule);
-}
-
-function setMinGap3(st, shift = 0) {
-  const ordered = sortByScore([...Array(45)].map((_, i) => i + 1), st.score);
-  const rule = (n, out) => out.every((x) => Math.abs(x - n) >= 3);
-  return pickFromOrdered(ordered, 6, shift, rule);
-}
-
-function setLowHigh33(st, shift = 0) {
-  const low = [];
-  const high = [];
-  for (let n = 1; n <= 45; n++) (n <= 22 ? low : high).push(n);
-  const l = pickFromOrdered(sortByScore(low, st.score), 3, shift);
-  const h = pickFromOrdered(sortByScore(high, st.score), 3, shift);
-  return uniqSorted([...l, ...h]).slice(0, 6);
-}
-
-function setRecentHeavy(st, shift = 0) {
-  const ordered = sortByScore([...Array(45)].map((_, i) => i + 1), st.scoreRecentHeavy);
-  return pickFromOrdered(ordered, 6, shift);
-}
-
-function setAntiRecent(st, shift = 0) {
-  const pool = st.orderByAll.slice(0, 35);
-  const ordered = sortByScore(pool, st.scoreAntiRecent);
-  return pickFromOrdered(ordered, 6, shift);
-}
-
-function setTopPool(st, shift = 0) {
-  const pool = st.orderByAll.slice(0, 30);
-  const ordered = sortByScore(pool, st.score);
-  return pickFromOrdered(ordered, 6, shift);
-}
-
-const STRATEGIES = [
-  { name: "TOP 6", make: setTop6 },
-  { name: "구간 균형", make: setRangeBalance },
-  { name: "홀짝 3:3", make: setOddEven33 },
-  { name: "끝수 분산", make: setEndDigitSpread },
-  { name: "근접수 회피", make: setNoAdj },
-  { name: "간격 분산", make: setMinGap3 },
-  { name: "저/고 3:3", make: setLowHigh33 },
-  { name: "최근 가중", make: setRecentHeavy },
-  { name: "최근 회피", make: setAntiRecent },
-  { name: "상위풀 엄선", make: setTopPool },
-];
-
-function pickDiverse(st, strat, prev, overlapLimit, baseShift) {
-  const MAX_SHIFT = 30;
-  for (let s = 0; s <= MAX_SHIFT; s++) {
-    const nums = strat.make(st, baseShift + s);
-    let ok = true;
-    for (const p of prev) {
-      if (overlapCount(p, nums) > overlapLimit) { ok = false; break; }
+  // 패턴 A: 구간 분산(1~10/11~20/21~30/31~40/41~45 + 추가1)
+  if (pattern === 0) {
+    const ranges = [
+      [1, 10],
+      [11, 20],
+      [21, 30],
+      [31, 40],
+      [41, 45],
+    ];
+    for (let r = 0; r < ranges.length; r++) {
+      const [a, b] = ranges[r];
+      pickFrom(base, used, idx + r * 3, (n) => n >= a && n <= b);
     }
-    if (ok) return nums;
+    // 추가 1개: 중간대(11~35)에서 빈도 높은 순으로
+    pickFrom(base, used, idx * 2 + 1, (n) => n >= 11 && n <= 35);
   }
-  return strat.make(st, baseShift);
+
+  // 패턴 B: 홀짝 3:3 + 핫 위주
+  if (pattern === 1) {
+    for (let i = 0; i < 3; i++) pickFrom(hot, used, idx + i * 2, (n) => n % 2 === 1);
+    for (let i = 0; i < 3; i++) pickFrom(hot, used, idx + i * 2 + 1, (n) => n % 2 === 0);
+  }
+
+  // 패턴 C: 끝수 분산(0~9 최대한 겹치지 않게) + 빈도 순
+  if (pattern === 2) {
+    const usedLast = new Set();
+    for (let i = 0; i < 6; i++) {
+      const n = pickFrom(base, used, idx + i * 5, (x) => !usedLast.has(x % 10));
+      if (n != null) usedLast.add(n % 10);
+    }
+    // 부족하면 그냥 채움
+    while (used.size < 6) pickFrom(base, used, idx + used.size);
+  }
+
+  // 패턴 D: 핫+미드+콜드 믹스(3/2/1)
+  if (pattern === 3) {
+    for (let i = 0; i < 3; i++) pickFrom(hot, used, idx + i * 3);
+    for (let i = 0; i < 2; i++) pickFrom(mid, used, idx + i * 4);
+    pickFrom(cold, used, idx * 2 + 7);
+  }
+
+  const result = Array.from(used).sort((a, b) => a - b);
+
+  // 안전장치: 혹시 덜 뽑히면 채움
+  while (result.length < 6) {
+    const n = pickFrom(base, used, idx + result.length * 7);
+    if (n == null) break;
+    result.push(n);
+    result.sort((a, b) => a - b);
+  }
+
+  return result;
 }
 
-function buildSets(st, count) {
-  const outNums = [];
-  const out = [];
+function mdLine(nums) {
+  return nums.map((n) => String(n).padStart(2, "0")).join(" ");
+}
 
-  const overlapLimit = count >= 10 ? 4 : (count >= 5 ? 5 : 6);
+async function main() {
+  let draws = [];
+  try {
+    draws = JSON.parse(await fs.readFile(DATA_PATH, "utf8"));
+  } catch {
+    draws = [];
+  }
 
+  if (!Array.isArray(draws) || draws.length === 0) {
+    console.log(
+      [
+        "추천 번호 오류: 데이터가 비어있습니다 (data/lotto.json = []). update-lotto로 먼저 채우세요.",
+        "데이터 파일 직접 확인: ./data/lotto.json",
+        "* 추천은 확률 보장이 아닙니다. “과거 빈도 + 분산 규칙” 기반입니다.",
+      ].join("\n")
+    );
+    return;
+  }
+
+  const freq = buildFreq(draws);
+  const base = sortedByFreq(freq);
+  const last = draws[draws.length - 1];
+
+  const count = [1, 5, 10].includes(SETS) ? SETS : 10;
+
+  const lines = [];
+  lines.push(`✅ 데이터: ${draws.length}회차 (최근: ${last.drwNo} / ${last.drwNoDate})`);
+  lines.push("");
+  lines.push(`### 추천 ${count}세트 (랜덤 없음 / 빈도+분산 규칙)`);
   for (let i = 0; i < count; i++) {
-    const strat = STRATEGIES[i % STRATEGIES.length];
-    const baseShift = i * 2; // 세트 간 분산(랜덤 없음)
-    const nums = pickDiverse(st, strat, outNums, overlapLimit, baseShift);
-    outNums.push(nums);
-    out.push({ idx: i + 1, name: strat.name, nums });
+    const set = makeSet(freq, base, i);
+    lines.push(`- **${i + 1}**: \`${mdLine(set)}\``);
   }
-  return out;
+  lines.push("");
+  lines.push("> *추천은 확률 보장이 아닙니다. 과거 데이터 기반 분산 추천입니다.*");
+
+  console.log(lines.join("\n"));
 }
 
-function fmt(nums) {
-  return nums.join(", ");
-}
-
-const draws = readData();
-if (!draws.length) {
-  console.log("NO_DATA");
-  process.exit(0);
-}
-
-const st = computeStats(draws);
-if (!st.latest) {
-  console.log("NO_DATA");
-  process.exit(0);
-}
-
-const sets10 = buildSets(st, 10);
-
-const lines = [];
-lines.push("✅ 로또 추천(빈도 기반 · 랜덤 없음)");
-lines.push(`- 데이터 회차 수: ${st.sorted.length}`);
-lines.push(`- 최신 회차: ${st.latest.drwNo} (${st.latest.drwNoDate || ""})`);
-lines.push("");
-lines.push("【1세트】");
-lines.push(`1) ${fmt(sets10[0].nums)}  (${sets10[0].name})`);
-lines.push("");
-lines.push("【5세트】");
-for (let i = 0; i < 5; i++) lines.push(`${i + 1}) ${fmt(sets10[i].nums)}  (${sets10[i].name})`);
-lines.push("");
-lines.push("【10세트】");
-for (let i = 0; i < 10; i++) lines.push(`${i + 1}) ${fmt(sets10[i].nums)}  (${sets10[i].name})`);
-
-console.log(lines.join("\n"));
+main().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});
