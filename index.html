@@ -73,6 +73,9 @@
   // ✅ 랜덤 없이 "버튼 클릭"으로만 변하는 결정적 사이클
   let cycle = Number(localStorage.getItem("lotto_cycle") || "0");
 
+  // ✅ 같은 cycle 유지 상태에서 "프리셋만 바꾸는" 시프트(0~3)
+  let presetShift = Number(localStorage.getItem("lotto_preset_shift") || "0");
+
   function ballClass(n){
     if(n<=10) return "b1";
     if(n<=20) return "b2";
@@ -122,7 +125,7 @@
     "핫/미드/콜드 3/2/1 믹스"
   ];
 
-  // ✅ 랜덤 없음. 대신 cycle(0,1,2,...)에 따라 패턴/오프셋이 바뀜
+  // ✅ 랜덤 없음. cycle(=salt) + presetShift로 패턴 결정
   function makeSet(base, idx, salt){
     const used = new Set();
 
@@ -130,14 +133,14 @@
     const mid  = base.slice(12, 30);
     const cold = base.slice(-12);
 
-    // salt(=cycle)가 바뀌면 패턴도 바뀌게
-    const pattern = (idx + salt) % 4;
+    // ✅ 핵심: presetShift를 더해서 "같은 cycle인데도 프리셋만 바뀌게"
+    const pattern = (idx + salt + presetShift) % 4;
 
     // 오프셋도 salt로 변형(완전 결정적)
-    const O1 = salt * 7 + idx * 3;
-    const O2 = salt * 11 + idx * 5;
-    const O3 = salt * 13 + idx * 7;
-    const O4 = salt * 17 + idx * 9;
+    const O1 = salt * 7 + idx * 3 + presetShift * 5;
+    const O2 = salt * 11 + idx * 5 + presetShift * 7;
+    const O3 = salt * 13 + idx * 7 + presetShift * 11;
+    const O4 = salt * 17 + idx * 9 + presetShift * 13;
 
     if(pattern === 0){
       const ranges=[[1,10],[11,20],[21,30],[31,40],[41,45]];
@@ -145,18 +148,15 @@
         const [a,b]=ranges[r];
         pickFrom(base, used, O1 + r*4, (n)=>n>=a && n<=b);
       }
-      // 추가 1개: 11~35에서 빈도 상위 + salt 이동
       pickFrom(base, used, O2 + 1, (n)=>n>=11 && n<=35);
     }
 
     if(pattern === 1){
-      // 홀짝 3:3
       for(let i=0;i<3;i++) pickFrom(hot, used, O1 + i*2, n=>n%2===1);
       for(let i=0;i<3;i++) pickFrom(hot, used, O2 + i*2, n=>n%2===0);
     }
 
     if(pattern === 2){
-      // 끝수 분산
       const usedLast = new Set();
       for(let i=0;i<6;i++){
         const n = pickFrom(base, used, O3 + i*6, x=>!usedLast.has(x%10));
@@ -166,7 +166,6 @@
     }
 
     if(pattern === 3){
-      // 핫/미드/콜드 믹스
       for(let i=0;i<3;i++) pickFrom(hot, used, O1 + i*3);
       for(let i=0;i<2;i++) pickFrom(mid, used, O2 + i*4);
       pickFrom(cold, used, O3 + 7);
@@ -174,7 +173,6 @@
 
     const res = Array.from(used).sort((a,b)=>a-b);
 
-    // 안전 채움
     while(res.length<6){
       const n = pickFrom(base, used, O4 + res.length*7);
       if(n==null) break;
@@ -194,7 +192,7 @@
       div.className="set";
 
       const head = document.createElement("h3");
-      head.innerHTML = `<span>${i+1}번 세트</span><span class="tag">${obj.preset} · cycle=${cycle}</span>`;
+      head.innerHTML = `<span>${i+1}번 세트</span><span class="tag">${obj.preset} · cycle=${cycle} · preset=${presetShift}</span>`;
       div.appendChild(head);
 
       const balls = document.createElement("div");
@@ -249,7 +247,7 @@
 
     const last = draws[draws.length-1];
     $("#status").textContent =
-      `데이터 ${draws.length}회차 (최근: ${last.drwNo} / ${last.drwNoDate}) · 현재 cycle=${cycle}`;
+      `데이터 ${draws.length}회차 (최근: ${last.drwNo} / ${last.drwNoDate}) · cycle=${cycle} · preset=${presetShift}`;
 
     return true;
   }
@@ -258,12 +256,13 @@
     if(!Array.isArray(draws) || draws.length===0) return;
 
     if(changeCycle){
-      cycle = (cycle + 1) % 100000; // ✅ 랜덤 없이 순번 증가
+      cycle = (cycle + 1) % 100000;
       localStorage.setItem("lotto_cycle", String(cycle));
-      const last = draws[draws.length-1];
-      $("#status").textContent =
-        `데이터 ${draws.length}회차 (최근: ${last.drwNo} / ${last.drwNoDate}) · 현재 cycle=${cycle}`;
     }
+
+    const last = draws[draws.length-1];
+    $("#status").textContent =
+      `데이터 ${draws.length}회차 (최근: ${last.drwNo} / ${last.drwNoDate}) · cycle=${cycle} · preset=${presetShift}`;
 
     const freq = buildFreq(draws);
     const base = sortedByFreq(freq);
@@ -280,19 +279,26 @@
       $$(".cnt").forEach(b=>b.classList.remove("active"));
       btn.classList.add("active");
       setCount = Number(btn.dataset.cnt);
-      // 세트 수 변경은 cycle 유지(원하면 새 조합 버튼 누르면 됨)
       generate(false);
     });
   });
 
-  $("#gen").addEventListener("click", ()=>generate(true));   // ✅ 새 조합(다른 결과)
-  $("#same").addEventListener("click", ()=>generate(false)); // 같은 조합 재생성
+  // ✅ 새 조합(다른 cycle)
+  $("#gen").addEventListener("click", ()=>generate(true));
+
+  // ✅ 같은 cycle 유지 + 프리셋만 바꾸기
+  $("#same").addEventListener("click", ()=>{
+    presetShift = (presetShift + 1) % 4;
+    localStorage.setItem("lotto_preset_shift", String(presetShift));
+    generate(false);
+  });
+
+  // ✅ 초기화(둘 다 초기화)
   $("#reset").addEventListener("click", ()=>{
     cycle = 0;
+    presetShift = 0;
     localStorage.setItem("lotto_cycle", "0");
-    const last = draws[draws.length-1];
-    $("#status").textContent =
-      `데이터 ${draws.length}회차 (최근: ${last.drwNo} / ${last.drwNoDate}) · 현재 cycle=${cycle}`;
+    localStorage.setItem("lotto_preset_shift", "0");
     generate(false);
   });
 
