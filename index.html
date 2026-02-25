@@ -16,7 +16,8 @@
     button.active{outline:2px solid #4e6bff;}
     .sets{margin-top:14px;display:grid;gap:10px;}
     .set{background:#0f1730;border:1px solid var(--line);border-radius:14px;padding:12px;}
-    .set h3{margin:0 0 8px;font-size:14px;color:#cfe0ff;}
+    .set h3{margin:0 0 8px;font-size:14px;color:#cfe0ff;display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;}
+    .tag{font-size:12px;color:var(--muted);font-weight:700;}
     .balls{display:flex;gap:8px;flex-wrap:wrap}
     .ball{
       width:38px;height:38px;border-radius:999px;
@@ -31,8 +32,8 @@
     .b3{background:#ff5a6a;}                 /* 21-30 */
     .b4{background:#a9b3c8;color:#10131c;}   /* 31-40 */
     .b5{background:#49d17a;color:#0b1a12;}   /* 41-45 */
-    .err{margin-top:10px;color:#ffb4b4;font-weight:700;}
-    a{color:#9fb3ff}
+    .err{margin-top:10px;color:#ffb4b4;font-weight:800;}
+    code{background:#0a1025;border:1px solid var(--line);padding:2px 6px;border-radius:8px}
   </style>
 </head>
 <body>
@@ -42,20 +43,22 @@
       <div id="status" class="muted">데이터 불러오는 중…</div>
 
       <div class="row">
-        <div class="muted" style="font-weight:800;">세트 수:</div>
+        <div class="muted" style="font-weight:900;">세트 수:</div>
         <button class="cnt active" data-cnt="1">1세트</button>
         <button class="cnt" data-cnt="5">5세트</button>
         <button class="cnt" data-cnt="10">10세트</button>
-        <button id="gen" style="margin-left:auto;">추천 생성</button>
+
+        <button id="gen" style="margin-left:auto;">추천 생성(새 조합)</button>
+        <button id="same">같은 조합 재생성</button>
+        <button id="reset">조합 초기화</button>
       </div>
 
       <div id="error" class="err" style="display:none;"></div>
-
       <div id="out" class="sets"></div>
 
       <div class="muted" style="margin-top:14px;">
-        * 추천은 확률 보장이 아닙니다. “과거 빈도 + 분산 규칙” 기반입니다.<br/>
-        * 데이터는 <code>data/lotto.json</code>에 저장되며, update-lotto 라벨로 자동 갱신됩니다.
+        * 랜덤(Math.random) 사용 없음. 버튼 누를 때마다 <b>조합 순번(cycle)</b>을 바꿔 다른 규칙 프리셋을 적용합니다.<br/>
+        * 데이터는 <code>data/lotto.json</code> (update-lotto로 갱신)
       </div>
     </div>
   </div>
@@ -66,6 +69,9 @@
 
   let draws = [];
   let setCount = 1;
+
+  // ✅ 랜덤 없이 "버튼 클릭"으로만 변하는 결정적 사이클
+  let cycle = Number(localStorage.getItem("lotto_cycle") || "0");
 
   function ballClass(n){
     if(n<=10) return "b1";
@@ -96,9 +102,10 @@
     return arr;
   }
 
+  // ✅ list에서 "offset" 기반으로 하나 선택 (랜덤 없음)
   function pickFrom(list, used, offset, pred=()=>true){
     for(let i=0;i<list.length;i++){
-      const n = list[(i+offset)%list.length];
+      const n = list[(i + offset) % list.length];
       if(!used.has(n) && pred(n)){
         used.add(n);
         return n;
@@ -107,66 +114,100 @@
     return null;
   }
 
-  function makeSet(freq, base, idx){
+  // ✅ 프리셋 이름(표시용)
+  const PRESET_NAME = [
+    "구간 분산 + 중간대 보강",
+    "홀짝 3:3 + 상위빈도 중심",
+    "끝수 분산(0~9 최대) + 빈도",
+    "핫/미드/콜드 3/2/1 믹스"
+  ];
+
+  // ✅ 랜덤 없음. 대신 cycle(0,1,2,...)에 따라 패턴/오프셋이 바뀜
+  function makeSet(base, idx, salt){
     const used = new Set();
-    const hot = base.slice(0,12);
-    const mid = base.slice(12,30);
+
+    const hot  = base.slice(0, 12);
+    const mid  = base.slice(12, 30);
     const cold = base.slice(-12);
-    const pattern = idx % 4;
+
+    // salt(=cycle)가 바뀌면 패턴도 바뀌게
+    const pattern = (idx + salt) % 4;
+
+    // 오프셋도 salt로 변형(완전 결정적)
+    const O1 = salt * 7 + idx * 3;
+    const O2 = salt * 11 + idx * 5;
+    const O3 = salt * 13 + idx * 7;
+    const O4 = salt * 17 + idx * 9;
 
     if(pattern === 0){
       const ranges=[[1,10],[11,20],[21,30],[31,40],[41,45]];
       for(let r=0;r<ranges.length;r++){
         const [a,b]=ranges[r];
-        pickFrom(base, used, idx + r*3, (n)=>n>=a && n<=b);
+        pickFrom(base, used, O1 + r*4, (n)=>n>=a && n<=b);
       }
-      pickFrom(base, used, idx*2+1, (n)=>n>=11 && n<=35);
+      // 추가 1개: 11~35에서 빈도 상위 + salt 이동
+      pickFrom(base, used, O2 + 1, (n)=>n>=11 && n<=35);
     }
 
     if(pattern === 1){
-      for(let i=0;i<3;i++) pickFrom(hot, used, idx+i*2, n=>n%2===1);
-      for(let i=0;i<3;i++) pickFrom(hot, used, idx+i*2+1, n=>n%2===0);
+      // 홀짝 3:3
+      for(let i=0;i<3;i++) pickFrom(hot, used, O1 + i*2, n=>n%2===1);
+      for(let i=0;i<3;i++) pickFrom(hot, used, O2 + i*2, n=>n%2===0);
     }
 
     if(pattern === 2){
+      // 끝수 분산
       const usedLast = new Set();
       for(let i=0;i<6;i++){
-        const n = pickFrom(base, used, idx+i*5, x=>!usedLast.has(x%10));
+        const n = pickFrom(base, used, O3 + i*6, x=>!usedLast.has(x%10));
         if(n!=null) usedLast.add(n%10);
       }
-      while(used.size<6) pickFrom(base, used, idx+used.size);
+      while(used.size<6) pickFrom(base, used, O4 + used.size);
     }
 
     if(pattern === 3){
-      for(let i=0;i<3;i++) pickFrom(hot, used, idx+i*3);
-      for(let i=0;i<2;i++) pickFrom(mid, used, idx+i*4);
-      pickFrom(cold, used, idx*2+7);
+      // 핫/미드/콜드 믹스
+      for(let i=0;i<3;i++) pickFrom(hot, used, O1 + i*3);
+      for(let i=0;i<2;i++) pickFrom(mid, used, O2 + i*4);
+      pickFrom(cold, used, O3 + 7);
     }
 
     const res = Array.from(used).sort((a,b)=>a-b);
+
+    // 안전 채움
     while(res.length<6){
-      const n = pickFrom(base, used, idx + res.length*7);
+      const n = pickFrom(base, used, O4 + res.length*7);
       if(n==null) break;
       res.push(n);
       res.sort((a,b)=>a-b);
     }
-    return res;
+
+    return { nums: res, preset: PRESET_NAME[pattern] };
   }
 
   function render(recs){
     const out = $("#out");
     out.innerHTML = "";
-    recs.forEach((nums, i)=>{
+    recs.forEach((obj, i)=>{
+      const nums = obj.nums;
       const div = document.createElement("div");
       div.className="set";
-      div.innerHTML = `<h3>${i+1}번 세트</h3><div class="balls"></div>`;
-      const balls = div.querySelector(".balls");
+
+      const head = document.createElement("h3");
+      head.innerHTML = `<span>${i+1}번 세트</span><span class="tag">${obj.preset} · cycle=${cycle}</span>`;
+      div.appendChild(head);
+
+      const balls = document.createElement("div");
+      balls.className = "balls";
+
       nums.forEach(n=>{
         const b = document.createElement("div");
         b.className = `ball ${ballClass(n)}`;
         b.textContent = String(n).padStart(2,"0");
         balls.appendChild(b);
       });
+
+      div.appendChild(balls);
       out.appendChild(div);
     });
   }
@@ -183,13 +224,13 @@
     }catch(e){
       err.style.display="block";
       err.textContent = "추천 번호 오류: 데이터 파일을 불러오지 못했습니다: 네트워크/경로 오류";
-      return;
+      return false;
     }
 
     if(!res.ok){
       err.style.display="block";
       err.textContent = `추천 번호 오류: 데이터 파일을 불러오지 못했습니다: ${res.status} (./data/lotto.json)`;
-      return;
+      return false;
     }
 
     try{
@@ -197,26 +238,39 @@
     }catch(e){
       err.style.display="block";
       err.textContent = "추천 번호 오류: lotto.json이 JSON 형식이 아닙니다.";
-      return;
+      return false;
     }
 
     if(!Array.isArray(draws) || draws.length===0){
       err.style.display="block";
       err.textContent = "추천 번호 오류: 데이터가 비어있습니다 (data/lotto.json = []). update-lotto로 먼저 채우세요.";
-      return;
+      return false;
     }
 
     const last = draws[draws.length-1];
-    $("#status").textContent = `데이터 ${draws.length}회차 (최근: ${last.drwNo} / ${last.drwNoDate})`;
+    $("#status").textContent =
+      `데이터 ${draws.length}회차 (최근: ${last.drwNo} / ${last.drwNoDate}) · 현재 cycle=${cycle}`;
+
+    return true;
   }
 
-  function generate(){
+  function generate(changeCycle){
     if(!Array.isArray(draws) || draws.length===0) return;
+
+    if(changeCycle){
+      cycle = (cycle + 1) % 100000; // ✅ 랜덤 없이 순번 증가
+      localStorage.setItem("lotto_cycle", String(cycle));
+      const last = draws[draws.length-1];
+      $("#status").textContent =
+        `데이터 ${draws.length}회차 (최근: ${last.drwNo} / ${last.drwNoDate}) · 현재 cycle=${cycle}`;
+    }
+
     const freq = buildFreq(draws);
     const base = sortedByFreq(freq);
+
     const recs = [];
     for(let i=0;i<setCount;i++){
-      recs.push(makeSet(freq, base, i));
+      recs.push(makeSet(base, i, cycle));
     }
     render(recs);
   }
@@ -226,12 +280,26 @@
       $$(".cnt").forEach(b=>b.classList.remove("active"));
       btn.classList.add("active");
       setCount = Number(btn.dataset.cnt);
+      // 세트 수 변경은 cycle 유지(원하면 새 조합 버튼 누르면 됨)
+      generate(false);
     });
   });
 
-  $("#gen").addEventListener("click", generate);
+  $("#gen").addEventListener("click", ()=>generate(true));   // ✅ 새 조합(다른 결과)
+  $("#same").addEventListener("click", ()=>generate(false)); // 같은 조합 재생성
+  $("#reset").addEventListener("click", ()=>{
+    cycle = 0;
+    localStorage.setItem("lotto_cycle", "0");
+    const last = draws[draws.length-1];
+    $("#status").textContent =
+      `데이터 ${draws.length}회차 (최근: ${last.drwNo} / ${last.drwNoDate}) · 현재 cycle=${cycle}`;
+    generate(false);
+  });
 
-  loadData();
+  (async ()=>{
+    const ok = await loadData();
+    if(ok) generate(false);
+  })();
 </script>
 </body>
 </html>
