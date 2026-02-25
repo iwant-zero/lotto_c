@@ -1,0 +1,374 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>로또 추천기 (빈도 기반 · 랜덤 없음)</title>
+  <style>
+    :root{--bg:#0b1020;--card:#111a33;--text:#e8ecff;--muted:#aab3d6;--line:#23305b;}
+    *{box-sizing:border-box}
+    body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,"Noto Sans KR",sans-serif;background:var(--bg);color:var(--text)}
+    .wrap{max-width:920px;margin:0 auto;padding:18px}
+    .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px;box-shadow:0 10px 30px rgba(0,0,0,.25)}
+    h1{margin:0 0 6px;font-size:20px}
+    .sub{margin:0 0 14px;color:var(--muted);font-size:13px;line-height:1.4}
+    .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+    .btns{display:flex;gap:8px;flex-wrap:wrap}
+    button{border:1px solid var(--line);background:#0e1630;color:var(--text);padding:10px 12px;border-radius:12px;cursor:pointer}
+    button.active{background:#1b2a5a;border-color:#3850a8}
+    button:disabled{opacity:.5;cursor:not-allowed}
+    .status{margin-left:auto;color:var(--muted);font-size:12px}
+    .sets{margin-top:14px;display:grid;gap:12px}
+    .set{border:1px solid var(--line);border-radius:14px;padding:12px;background:#0e1630}
+    .setTop{display:flex;align-items:center;justify-content:space-between;gap:10px}
+    .setName{font-weight:700;font-size:14px}
+    .setTag{color:var(--muted);font-size:12px}
+    .balls{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+    .ball{width:38px;height:38px;border-radius:999px;display:flex;align-items:center;justify-content:center;font-weight:800}
+    .b1{background:#f2c94c;color:#1b1b1b}  /* 1-10 */
+    .b2{background:#56ccf2;color:#0b1020}  /* 11-20 */
+    .b3{background:#eb5757;color:#fff}     /* 21-30 */
+    .b4{background:#bdbdbd;color:#0b1020}  /* 31-40 */
+    .b5{background:#27ae60;color:#fff}     /* 41-45 */
+    .err{margin-top:12px;padding:12px;border-radius:12px;border:1px solid #5a2a2a;background:#2a1111;color:#ffcccc}
+    a{color:#9db2ff}
+    .foot{margin-top:12px;color:var(--muted);font-size:12px;line-height:1.5}
+    code{background:#0a0f22;border:1px solid var(--line);padding:2px 6px;border-radius:8px}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>로또 추천기 (빈도 기반 · 랜덤 없음)</h1>
+      <p class="sub">
+        <code>data/lotto.json</code> 누적 데이터 기반으로
+        구간/홀짝/끝수/간격 분산 규칙으로 추천합니다.
+      </p>
+
+      <div class="row">
+        <div class="btns">
+          <button id="b1" class="active" data-n="1">1세트</button>
+          <button id="b5" data-n="5">5세트</button>
+          <button id="b10" data-n="10">10세트</button>
+          <button id="reload">새로 불러오기</button>
+        </div>
+        <div class="status" id="status">데이터 불러오는 중…</div>
+      </div>
+
+      <div id="error" class="err" style="display:none"></div>
+      <div class="sets" id="sets"></div>
+
+      <div class="foot">
+        데이터 파일 직접 확인:
+        <a id="dataLink" href="#" target="_blank" rel="noopener">data/lotto.json</a>
+        <br/>
+        * 추천은 확률 보장이 아닙니다. “과거 빈도 + 분산 규칙” 기반입니다.
+      </div>
+    </div>
+  </div>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+
+  // ✅ 프로젝트 Pages(/repo/)에서도, 로컬에서도, repo명이 바뀌어도 안정적으로 base를 잡음
+  function getBasePath() {
+    const parts = location.pathname.split("/").filter(Boolean);
+    // GitHub Project Pages: /<repo>/...
+    // - 루트 접속이면 parts[0]이 repo
+    // - index.html로 직접 들어오는 경우도 포함
+    if (location.hostname.endsWith("github.io") && parts.length >= 1) {
+      return "/" + parts[0] + "/";
+    }
+    // 그 외(로컬/커스텀 도메인): 현재 디렉토리 기준
+    const p = location.pathname;
+    return p.endsWith("/") ? p : p.substring(0, p.lastIndexOf("/") + 1);
+  }
+
+  const BASE = getBasePath();
+  const DATA_URL = BASE + "data/lotto.json";
+
+  const statusEl = $("status");
+  const errEl = $("error");
+  const setsEl = $("sets");
+  const dataLink = $("dataLink");
+  dataLink.href = DATA_URL;
+  dataLink.textContent = DATA_URL;
+
+  const buttons = [$("b1"), $("b5"), $("b10")];
+  let allSets = [];
+  let curN = 1;
+
+  function ballClass(n){
+    if (n <= 10) return "b1";
+    if (n <= 20) return "b2";
+    if (n <= 30) return "b3";
+    if (n <= 40) return "b4";
+    return "b5";
+  }
+
+  function showError(msg){
+    errEl.style.display = "block";
+    errEl.textContent = msg;
+  }
+  function clearError(){
+    errEl.style.display = "none";
+    errEl.textContent = "";
+  }
+
+  function overlapCount(a,b){
+    const s = new Set(a);
+    let c = 0;
+    for (const x of b) if (s.has(x)) c++;
+    return c;
+  }
+  function uniqSorted(arr){
+    return Array.from(new Set(arr)).sort((a,b)=>a-b);
+  }
+  function sortByScore(nums, score){
+    return nums.slice().sort((a,b)=> (score[b]-score[a]) || (a-b));
+  }
+
+  function computeStats(draws){
+    const countsAll = Array(46).fill(0);
+    const countsRecent = Array(46).fill(0);
+
+    const sorted = draws.slice().sort((a,b)=> (a.drwNo||0)-(b.drwNo||0));
+    const latest = sorted[sorted.length-1] || null;
+
+    const RECENT_N = 80;
+    const recent = sorted.slice(-RECENT_N);
+
+    for (const d of sorted){
+      for (const n of (d.nums||[])) countsAll[n]++;
+    }
+    for (const d of recent){
+      for (const n of (d.nums||[])) countsRecent[n]++;
+    }
+
+    const maxAll = Math.max(...countsAll.slice(1), 1);
+    const maxRecent = Math.max(...countsRecent.slice(1), 1);
+
+    const score = Array(46).fill(0);
+    const scoreRecentHeavy = Array(46).fill(0);
+    const scoreAntiRecent = Array(46).fill(0);
+
+    for (let n=1;n<=45;n++){
+      const a = countsAll[n] / maxAll;
+      const r = countsRecent[n] / maxRecent;
+      score[n] = a*0.8 + r*0.2;
+      scoreRecentHeavy[n] = a*0.5 + r*0.5;
+      scoreAntiRecent[n] = a - r*0.6;
+    }
+
+    const allNums = [...Array(45)].map((_,i)=>i+1);
+    const orderByAll = allNums.slice().sort((a,b)=> (countsAll[b]-countsAll[a]) || (a-b));
+
+    return {sorted, latest, score, scoreRecentHeavy, scoreAntiRecent, orderByAll};
+  }
+
+  function pickFromOrdered(ordered, k, shift=0, rule=null){
+    const out = [];
+    const used = new Set();
+    const start = Math.max(0, shift|0);
+
+    for (let i=start;i<ordered.length && out.length<k;i++){
+      const n = ordered[i];
+      if (used.has(n)) continue;
+      if (rule && !rule(n, out)) continue;
+      used.add(n); out.push(n);
+    }
+    if (out.length<k){
+      for (let i=start;i<ordered.length && out.length<k;i++){
+        const n = ordered[i];
+        if (used.has(n)) continue;
+        used.add(n); out.push(n);
+      }
+    }
+    return out.sort((a,b)=>a-b);
+  }
+
+  // 전략(랜덤 없음)
+  function setTop6(st, shift=0){
+    const ordered = sortByScore([...Array(45)].map((_,i)=>i+1), st.score);
+    return pickFromOrdered(ordered, 6, shift);
+  }
+  function setRangeBalance(st, shift=0){
+    const pick2 = (min,max, s) => {
+      const pool = [];
+      for (let n=min;n<=max;n++) pool.push(n);
+      const ordered = sortByScore(pool, st.score);
+      return pickFromOrdered(ordered, 2, s);
+    };
+    const a = pick2(1,15, shift);
+    const b = pick2(16,30, shift);
+    const c = pick2(31,45, shift);
+    return uniqSorted([...a,...b,...c]).slice(0,6);
+  }
+  function setOddEven33(st, shift=0){
+    const all = [...Array(45)].map((_,i)=>i+1);
+    const odds = all.filter(n=>n%2===1);
+    const evens = all.filter(n=>n%2===0);
+    const o = pickFromOrdered(sortByScore(odds, st.score), 3, shift);
+    const e = pickFromOrdered(sortByScore(evens, st.score), 3, shift);
+    return uniqSorted([...o,...e]).slice(0,6);
+  }
+  function setEndDigitSpread(st, shift=0){
+    const ordered = sortByScore([...Array(45)].map((_,i)=>i+1), st.score);
+    const used = new Set();
+    const rule = (n) => { const d=n%10; if (used.has(d)) return false; used.add(d); return true; };
+    return pickFromOrdered(ordered, 6, shift, rule);
+  }
+  function setNoAdj(st, shift=0){
+    const ordered = sortByScore([...Array(45)].map((_,i)=>i+1), st.score);
+    const rule = (n,out)=> out.every(x=>Math.abs(x-n)>1);
+    return pickFromOrdered(ordered, 6, shift, rule);
+  }
+  function setMinGap3(st, shift=0){
+    const ordered = sortByScore([...Array(45)].map((_,i)=>i+1), st.score);
+    const rule = (n,out)=> out.every(x=>Math.abs(x-n)>=3);
+    return pickFromOrdered(ordered, 6, shift, rule);
+  }
+  function setLowHigh33(st, shift=0){
+    const low=[], high=[];
+    for (let n=1;n<=45;n++) (n<=22?low:high).push(n);
+    const l = pickFromOrdered(sortByScore(low, st.score), 3, shift);
+    const h = pickFromOrdered(sortByScore(high, st.score), 3, shift);
+    return uniqSorted([...l,...h]).slice(0,6);
+  }
+  function setRecentHeavy(st, shift=0){
+    const ordered = sortByScore([...Array(45)].map((_,i)=>i+1), st.scoreRecentHeavy);
+    return pickFromOrdered(ordered, 6, shift);
+  }
+  function setAntiRecent(st, shift=0){
+    const pool = st.orderByAll.slice(0,35);
+    const ordered = sortByScore(pool, st.scoreAntiRecent);
+    return pickFromOrdered(ordered, 6, shift);
+  }
+  function setTopPool(st, shift=0){
+    const pool = st.orderByAll.slice(0,30);
+    const ordered = sortByScore(pool, st.score);
+    return pickFromOrdered(ordered, 6, shift);
+  }
+
+  const STRATS = [
+    {name:"TOP 6", make:setTop6},
+    {name:"구간 균형", make:setRangeBalance},
+    {name:"홀짝 3:3", make:setOddEven33},
+    {name:"끝수 분산", make:setEndDigitSpread},
+    {name:"근접수 회피", make:setNoAdj},
+    {name:"간격 분산", make:setMinGap3},
+    {name:"저/고 3:3", make:setLowHigh33},
+    {name:"최근 가중", make:setRecentHeavy},
+    {name:"최근 회피", make:setAntiRecent},
+    {name:"상위풀 엄선", make:setTopPool},
+  ];
+
+  function pickDiverseSet(st, strat, prevSets, overlapLimit, baseShift){
+    const MAX_SHIFT = 30;
+    for (let s=0; s<=MAX_SHIFT; s++){
+      const nums = strat.make(st, baseShift + s);
+      let ok = true;
+      for (const p of prevSets){
+        if (overlapCount(p, nums) > overlapLimit){ ok=false; break; }
+      }
+      if (ok) return nums;
+    }
+    return strat.make(st, baseShift);
+  }
+
+  function buildSets(st, count){
+    const outNums = [];
+    const out = [];
+    const overlapLimit = count >= 10 ? 4 : (count >= 5 ? 5 : 6);
+
+    for (let i=0;i<count;i++){
+      const strat = STRATS[i % STRATS.length];
+      const baseShift = i * 2; // ✅ 랜덤 없이 분산
+      const nums = pickDiverseSet(st, strat, outNums, overlapLimit, baseShift);
+      outNums.push(nums);
+      out.push({idx:i+1, name:strat.name, nums});
+    }
+    return out;
+  }
+
+  function render(n){
+    setsEl.innerHTML = "";
+    const slice = allSets.slice(0,n);
+
+    for (const s of slice){
+      const box = document.createElement("div");
+      box.className = "set";
+
+      const top = document.createElement("div");
+      top.className = "setTop";
+
+      const left = document.createElement("div");
+      left.innerHTML = `<div class="setName">${s.idx}) ${s.name}</div>`;
+
+      const tag = document.createElement("div");
+      tag.className = "setTag";
+      tag.textContent = "랜덤 없음 · 빈도+분산 규칙";
+
+      top.appendChild(left);
+      top.appendChild(tag);
+
+      const balls = document.createElement("div");
+      balls.className = "balls";
+
+      for (const num of s.nums){
+        const b = document.createElement("div");
+        b.className = `ball ${ballClass(num)}`;
+        b.textContent = String(num);
+        balls.appendChild(b);
+      }
+
+      box.appendChild(top);
+      box.appendChild(balls);
+      setsEl.appendChild(box);
+    }
+  }
+
+  async function load(){
+    clearError();
+    statusEl.textContent = "데이터 불러오는 중…";
+    buttons.forEach(b=>b.disabled=true);
+
+    try{
+      const res = await fetch(DATA_URL, {cache:"no-store"});
+      if (!res.ok) throw new Error(String(res.status));
+      const draws = await res.json();
+
+      if (!Array.isArray(draws) || draws.length === 0){
+        throw new Error("데이터가 비어있습니다 (data/lotto.json = []). update-lotto로 먼저 채우세요.");
+      }
+
+      const st = computeStats(draws);
+      allSets = buildSets(st, 10);
+
+      statusEl.textContent = `회차 ${st.sorted.length}개 · 최신 ${st.latest?.drwNo || "-"} (${st.latest?.drwNoDate || ""})`;
+      buttons.forEach(b=>b.disabled=false);
+      render(curN);
+    }catch(e){
+      showError(`추천 번호 오류: ${e.message}`);
+      statusEl.textContent = "불러오기 실패";
+      buttons.forEach(b=>b.disabled=false);
+      setsEl.innerHTML = "";
+    }
+  }
+
+  buttons.forEach(btn=>{
+    btn.addEventListener("click", ()=>{
+      buttons.forEach(b=>b.classList.remove("active"));
+      btn.classList.add("active");
+      curN = Number(btn.dataset.n);
+      render(curN);
+    });
+  });
+  $("reload").addEventListener("click", load);
+
+  load();
+})();
+</script>
+</body>
+</html>
