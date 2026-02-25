@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>로또 추천기 (빈도+분산 / 랜덤 없음)</title>
+  <title>로또 추천기 (빈도+분산)</title>
   <style>
     :root { --bg:#0b1020; --card:#121a33; --txt:#eaf0ff; --muted:#97a3c5; --line:#23305c; }
     body{margin:0;background:var(--bg);color:var(--txt);font-family:system-ui,-apple-system,Segoe UI,Roboto,"Noto Sans KR",sans-serif;}
@@ -39,7 +39,7 @@
 <body>
   <div class="wrap">
     <div class="card">
-      <h1>로또 추천기 (랜덤 없음 / 빈도 + 분산 규칙)</h1>
+      <h1>로또 추천기 ( 빈도 + 분산 규칙)</h1>
       <div id="status" class="muted">데이터 불러오는 중…</div>
       <div class="row">
         <div class="muted" style="font-weight:900;">세트 수:</div>
@@ -53,7 +53,7 @@
       <div id="error" class="err" style="display:none;"></div>
       <div id="out" class="sets"></div>
       <div class="muted" style="margin-top:14px;">
-        * 랜덤(Math.random) 사용 없음. 버튼 누를 때마다 <b>조합 순번(cycle)</b>을 바꿔 다른 규칙 프리셋을 적용합니다.<br/>
+        * 랜덤(Math.random). 버튼 누를 때마다 <b>조합 순번(cycle)</b>을 바꿔 다른 규칙 프리셋을 적용합니다.<br/>
         * 데이터는 <code>data/lotto.json</code> (update-lotto로 갱신)
       </div>
     </div>
