@@ -21,6 +21,10 @@ permissions:
   contents: write
   issues: write
 
+concurrency:
+  group: lotto-issueops
+  cancel-in-progress: false
+
 jobs:
   issueops:
     runs-on: ubuntu-latest
@@ -40,6 +44,22 @@ jobs:
         with:
           node-version: 20
 
+      # ✅ "진짜 어떤 파일이 실행되는지" 강제 확인용 로그
+      - name: Debug - confirm script version
+        run: |
+          echo "EVENT: ${{ github.event_name }}"
+          echo "LABEL: ${{ github.event.label.name }}"
+          echo "HEAD COMMIT:"
+          git rev-parse HEAD
+          echo "update_lotto.mjs sha256:"
+          sha256sum scripts/update_lotto.mjs
+          echo "update_lotto.mjs first 40 lines:"
+          sed -n '1,40p' scripts/update_lotto.mjs
+          echo "-----"
+          echo "lotto.json exists?"
+          ls -la data || true
+          ls -la data/lotto.json || true
+
       - name: Decide mode/sets
         id: cfg
         run: |
@@ -51,13 +71,19 @@ jobs:
             fi
             echo "sets=10" >> $GITHUB_OUTPUT
           else
-            echo "mode=${{ inputs.mode || 'update' }}" >> $GITHUB_OUTPUT
-            echo "sets=${{ inputs.sets || '10' }}" >> $GITHUB_OUTPUT
+            echo "mode=${{ inputs.mode }}" >> $GITHUB_OUTPUT
+            echo "sets=${{ inputs.sets }}" >> $GITHUB_OUTPUT
           fi
 
       - name: Update lotto data (update-lotto)
         if: steps.cfg.outputs.mode == 'update'
         run: node scripts/update_lotto.mjs
+
+      # ✅ 데이터가 비었으면 실패로 처리(성공처럼 넘어가면 UI가 계속 []임)
+      - name: Verify data not empty
+        if: steps.cfg.outputs.mode == 'update'
+        run: |
+          node -e "const fs=require('fs');const a=JSON.parse(fs.readFileSync('data/lotto.json','utf8')); if(!Array.isArray(a)||a.length===0){console.error('lotto.json is empty'); process.exit(1);} console.log('lotto.json OK length=',a.length);"
 
       - name: Commit & push (only if changed)
         if: steps.cfg.outputs.mode == 'update'
@@ -75,9 +101,11 @@ jobs:
           git push
 
       - name: Build comment body
-        id: body
         run: |
           node scripts/recommend.mjs ${{ steps.cfg.outputs.sets }} > comment.md
+          echo "" >> comment.md
+          echo "---" >> comment.md
+          echo "_데이터 파일: ./data/lotto.json_" >> comment.md
 
       - name: Comment to issue (issues only)
         if: github.event_name == 'issues'
